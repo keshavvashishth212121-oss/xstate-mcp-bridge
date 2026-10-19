@@ -69,12 +69,22 @@ HTTP, or another supported MCP transport.
   application's process.
 - Transition history is in-memory and is lost when the process exits.
 
+### Deployment responsibility
+
+Bridge permissions are application-level capability controls, not client authentication. This library does not authenticate MCP callers, authorize users, isolate the actor process, or make context and tool output trustworthy. Applications exposing the bridge over a network must provide transport-level authentication, authorization, network restrictions, and any required approval workflow or process isolation.
+
 ## Use cases
 
-- Human-in-the-loop approval workflows
-- Deployment and release state machines
-- Operational runbooks and incident workflows
-- Customer support workflows with controlled actions
+- **Approvals:** An AI assistant can request or observe approvals, but cannot skip `pending -> approved` guards.
+- **Deployments:** An operator can expose build, test, approval, and deploy states without allowing an MCP client to jump directly to `deployed`.
+- **Incident runbooks:** An agent can advance a remediation workflow while the application retains authority over valid transitions.
+
+## Non-goals
+
+- This is not an MCP authentication server.
+- This is not a durable event store.
+- This is not a replacement for XState.
+- This does not provide process isolation.
 
 ## API reference
 
@@ -116,10 +126,16 @@ dependency on DevCompanion AI, its application, prompts, storage, or user
 interface. It can be used independently in any TypeScript project that
 already owns an XState actor.
 
+DevCompanion AI was the first real consumer of this bridge, not a runtime dependency. The reusable boundary is the running XState actor: applications own their machines, guards, context, and business rules; this library adds a controlled MCP interface without importing application-specific prompts, storage, sandbox logic, or UI.
+
 ## Package status
 
 The repository is the source release for the current hackathon submission. An
 npm package release is planned after the API stabilizes.
+
+## Security Warning
+
+> **Note:** Mutating permissions (`sendEvent`, `reset`) default to enabled for ease of use in local development. For externally reachable MCP servers, explicitly configure permissions to deny mutations unless required, rather than relying on defaults.
 
 ## Roadmap
 

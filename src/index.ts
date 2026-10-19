@@ -71,7 +71,7 @@ function availableEvents(snapshot: SnapshotLike): string[] {
       }
     }
   }
-  return [...events];
+  return [...events].filter((eventType) => snapshot.can?.({ type: eventType }) ?? true);
 }
 
 export function createMcpBridge({
