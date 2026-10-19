@@ -2,13 +2,15 @@ import { createActor, createMachine } from 'xstate';
 import { describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { createMcpBridge } from '../src/index.js';
+import { createMcpBridge, type CreateMcpBridgeOptions } from '../src/index.js';
 
-function setup(permissions?: Parameters<typeof createMcpBridge>[0]['permissions']) {
+type BridgeTestOptions = Pick<CreateMcpBridgeOptions, 'permissions' | 'maxHistory' | 'redactContext'>;
+
+function setup(options: BridgeTestOptions = {}) {
   const machine = createMachine({
     id: 'test',
     initial: 'pending',
-    context: { count: 0 },
+    context: { count: 0, secret: 'sensitive-value' },
     states: {
       pending: { on: { PAY: 'paid' } },
       paid: { on: { SHIP: 'shipped' } },
@@ -16,7 +18,7 @@ function setup(permissions?: Parameters<typeof createMcpBridge>[0]['permissions'
     },
   });
   const actor = createActor(machine).start();
-  const server = createMcpBridge({ name: 'test', actor, permissions });
+  const server = createMcpBridge({ name: 'test', actor, ...options });
   return { actor, server };
 }
 
@@ -29,40 +31,72 @@ async function connect(server: ReturnType<typeof createMcpBridge>) {
 }
 
 describe('xstate-mcp-bridge', () => {
-  it('get_state works', async () => {
+  it('get_state returns the correct initial state and context', async () => {
     const client = await connect(setup().server);
     const response = await client.callTool({ name: 'get_state', arguments: {} });
-    expect(response.structuredContent).toMatchObject({ state: 'pending', context: { count: 0 } });
-  });
-
-  it('send_event triggers a transition', async () => {
-    const { server, actor } = setup();
-    const client = await connect(server);
-    await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
-    expect(actor.getSnapshot().value).toBe('paid');
-  });
-
-  it('invalid event throws an error', async () => {
-    const client = await connect(setup().server);
-    const response = await client.callTool({ name: 'send_event', arguments: { type: 'SHIP' } });
-    expect(response.isError).toBe(true);
-    expect(response.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining('Invalid event') }));
-  });
-
-  it('get_history tracks transitions', async () => {
-    const client = await connect(setup().server);
-    await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
-    const response = await client.callTool({ name: 'get_history', arguments: {} });
-    expect(response.structuredContent).toMatchObject({
-      history: [expect.objectContaining({ from: 'pending', to: 'paid' })],
+    expect(response.structuredContent).toEqual({
+      state: 'pending',
+      context: { count: 0, secret: 'sensitive-value' },
     });
   });
 
-  it('permissions prevent mutating actions', async () => {
-    const { server, actor } = setup({ readState: true, sendEvent: false });
+  it('send_event transitions the state from pending to paid', async () => {
+    const { server, actor } = setup();
     const client = await connect(server);
     const response = await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
+
+    expect(response.structuredContent).toMatchObject({ state: 'paid' });
+    expect(actor.getSnapshot().value).toBe('paid');
+  });
+
+  it('send_event rejects an event that is invalid in the current state', async () => {
+    const client = await connect(setup().server);
+    const response = await client.callTool({ name: 'send_event', arguments: { type: 'SHIP' } });
+
     expect(response.isError).toBe(true);
+    expect(response.content).toContainEqual(
+      expect.objectContaining({
+        text: expect.stringContaining("Event 'SHIP' is not valid in state 'pending'"),
+      }),
+    );
+  });
+
+  it('get_history returns the past transitions in order', async () => {
+    const client = await connect(setup().server);
+    await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
+    await client.callTool({ name: 'send_event', arguments: { type: 'SHIP' } });
+    const response = await client.callTool({ name: 'get_history', arguments: {} });
+
+    expect(response.structuredContent).toMatchObject({
+      history: [
+        expect.objectContaining({ event: { type: 'PAY' }, from: 'pending', to: 'paid' }),
+        expect.objectContaining({ event: { type: 'SHIP' }, from: 'paid', to: 'shipped' }),
+      ],
+    });
+  });
+
+  it('permissions prevent send_event mutations', async () => {
+    const { server, actor } = setup({ permissions: { readState: true, sendEvent: false } });
+    const client = await connect(server);
+    const response = await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
+
+    expect(response.isError).toBe(true);
+    expect(response.content).toContainEqual(
+      expect.objectContaining({ text: expect.stringContaining('Permission denied: sendEvent') }),
+    );
     expect(actor.getSnapshot().value).toBe('pending');
+  });
+
+  it('get_state applies redactContext before returning context', async () => {
+    const { server } = setup({
+      redactContext: (context: { count: number; secret: string }) => ({ count: context.count }),
+    });
+    const client = await connect(server);
+    const response = await client.callTool({ name: 'get_state', arguments: {} });
+
+    expect(response.structuredContent).toEqual({
+      state: 'pending',
+      context: { count: 0 },
+    });
   });
 });

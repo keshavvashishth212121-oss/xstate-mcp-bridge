@@ -1,5 +1,6 @@
 # xstate-mcp-bridge
 
+[![CI](https://github.com/keshavvashishth212121-oss/xstate-mcp-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/keshavvashishth212121-oss/xstate-mcp-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Expose [XState](https://stately.ai/docs/xstate) actors as tools for the
@@ -43,6 +44,22 @@ The actor must be started by the application. The returned MCP server can be
 connected to any supported MCP transport. `server.reset()` clears the
 bridge's in-memory transition history when the `reset` permission is enabled.
 
+## Demo Output
+
+```text
+$ npx tsx examples/demo.ts
+
+send_event (PAY): { state: 'paid', context: { orderId: 'order-123' } }
+send_event (SHIP): { state: 'shipped', context: { orderId: 'order-123' } }
+send_event (PAY again) error: Event 'PAY' is not valid in state 'shipped'
+get_history: {
+  history: [
+    { event: 'PAY', from: 'pending', to: 'paid', timestamp: '...' },
+    { event: 'SHIP', from: 'paid', to: 'shipped', timestamp: '...' }
+  ]
+}
+```
+
 ## Tools Exposed
 
 | Tool | Input | Description |
@@ -68,6 +85,21 @@ Disabled operations fail explicitly. `send_event` also checks the actor
 snapshot's `can()` method before sending, so events that are not valid in the
 current state are rejected.
 
+## Security & Limitations
+
+History is currently in-memory and bounded by maxHistory (default 1000).
+
+Context redaction can be enabled via the redactContext option to prevent
+leaking secrets (e.g., API keys).
+
+send_event strictly validates events against the XState can() method before
+sending.
+
+## Testing
+
+Run npm test to execute the Vitest suite. The 6 tests cover valid transitions,
+invalid event rejection, permission restrictions, and context redaction.
+
 ## Relationship to DevCompanion AI
 
 This library was extracted from the state-machine integration work in
@@ -80,5 +112,3 @@ used independently in any TypeScript project that already owns an XState actor.
 - Add optional persistence adapters for transition history.
 - Support richer state matching for deeply nested state values.
 - Provide adapters and examples for HTTP and WebSocket MCP transports.
-- Add configurable history limits and redaction hooks for sensitive context.
-

@@ -12,6 +12,8 @@ export interface CreateMcpBridgeOptions {
   name: string;
   actor: AnyActorRef;
   permissions?: BridgePermissions;
+  maxHistory?: number;
+  redactContext?: (context: any) => any;
 }
 
 export interface TransitionRecord {
@@ -57,6 +59,8 @@ export function createMcpBridge({
   name,
   actor,
   permissions = {},
+  maxHistory = 1000,
+  redactContext,
 }: CreateMcpBridgeOptions): McpBridge {
   const canReadState = permissions.readState !== false;
   const canSendEvent = permissions.sendEvent !== false;
@@ -92,7 +96,8 @@ export function createMcpBridge({
     async () => {
       if (!canReadState) permissionDenied('readState');
       const snapshot = snapshotOf(actor);
-      return result({ state: snapshot.value, context: snapshot.context });
+      const safeContext = redactContext ? redactContext(snapshot.context) : snapshot.context;
+      return result({ state: snapshot.value, context: safeContext });
     },
   );
 
@@ -107,7 +112,7 @@ export function createMcpBridge({
       const event = eventSchema.parse(input) as AnyEventObject;
       const snapshot = snapshotOf(actor);
       if (snapshot.can && !snapshot.can(event)) {
-        throw new Error(`Invalid event for current state: ${event.type}`);
+        throw new Error(`Event '${event.type}' is not valid in state '${snapshot.value}'`);
       }
       pendingEvent = event;
       actor.send(event);
@@ -123,6 +128,9 @@ export function createMcpBridge({
     },
     async () => {
       if (!canReadState) permissionDenied('readState');
+      while (history.length > maxHistory) {
+        history.shift();
+      }
       return result({ history: [...history] });
     },
   );
