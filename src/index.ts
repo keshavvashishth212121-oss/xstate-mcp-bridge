@@ -32,6 +32,9 @@ interface SnapshotLike {
   context: unknown;
   can?: (event: AnyEventObject) => boolean;
   matches?: (state: unknown) => boolean;
+  _nodes?: Array<{
+    transitions?: Map<string, unknown> | Record<string, unknown>;
+  }>;
 }
 
 const eventSchema = z.object({ type: z.string() }).catchall(z.unknown());
@@ -55,6 +58,22 @@ function result(value: unknown) {
   };
 }
 
+function availableEvents(snapshot: SnapshotLike): string[] {
+  const events = new Set<string>();
+  for (const node of snapshot._nodes ?? []) {
+    if (node.transitions instanceof Map) {
+      for (const eventType of node.transitions.keys()) {
+        events.add(eventType);
+      }
+    } else if (node.transitions) {
+      for (const eventType of Object.keys(node.transitions)) {
+        events.add(eventType);
+      }
+    }
+  }
+  return [...events];
+}
+
 export function createMcpBridge({
   name,
   actor,
@@ -66,6 +85,8 @@ export function createMcpBridge({
   const canSendEvent = permissions.sendEvent !== false;
   const canReset = permissions.reset !== false;
   const history: TransitionRecord[] = [];
+  const historyLimit = Math.max(0, maxHistory);
+  let droppedCount = 0;
   let previousState: unknown = snapshotOf(actor).value;
   let pendingEvent: AnyEventObject | undefined;
 
@@ -102,6 +123,23 @@ export function createMcpBridge({
   );
 
   server.registerTool(
+    'get_capabilities',
+    {
+      description: "Return the machine's current state, available events, and bridge permissions.",
+    },
+    async () => {
+      if (!canReadState) permissionDenied('readState');
+      const snapshot = snapshotOf(actor);
+      return result({
+        machine_name: name,
+        current_state: snapshot.value,
+        available_events: availableEvents(snapshot),
+        permissions,
+      });
+    },
+  );
+
+  server.registerTool(
     'send_event',
     {
       description: 'Validate and send an event to the actor.',
@@ -128,10 +166,15 @@ export function createMcpBridge({
     },
     async () => {
       if (!canReadState) permissionDenied('readState');
-      while (history.length > maxHistory) {
+      while (history.length > historyLimit) {
         history.shift();
+        droppedCount += 1;
       }
-      return result({ history: [...history] });
+      return result({
+        history: [...history],
+        truncated: droppedCount > 0,
+        droppedCount,
+      });
     },
   );
 
@@ -153,22 +196,27 @@ export function createMcpBridge({
 
       const reached = await new Promise<SnapshotLike>((resolve, reject) => {
         let settled = false;
-        const subscription = actor.subscribe((nextSnapshot) => {
-          const next = nextSnapshot as SnapshotLike;
-          if (!settled && stateMatches(next, state)) {
-            settled = true;
-            clearTimeout(timer);
-            subscription.unsubscribe();
-            resolve(next);
-          }
-        });
+        let subscription: { unsubscribe: () => void } | undefined;
+        const cleanup = () => {
+          clearTimeout(timer);
+          subscription?.unsubscribe();
+        };
         const timer = setTimeout(() => {
           if (!settled) {
             settled = true;
-            subscription.unsubscribe();
+            cleanup();
             reject(new Error(`Timed out waiting for state: ${state}`));
           }
         }, timeout);
+        subscription = actor.subscribe((nextSnapshot) => {
+          const next = nextSnapshot as SnapshotLike;
+          if (!settled && stateMatches(next, state)) {
+            settled = true;
+            cleanup();
+            resolve(next);
+          }
+        });
+        if (settled) subscription.unsubscribe();
       });
       return result({ state: reached.value, context: reached.context });
     },
@@ -178,6 +226,7 @@ export function createMcpBridge({
   bridge.reset = () => {
     if (!canReset) permissionDenied('reset');
     history.length = 0;
+    droppedCount = 0;
     previousState = snapshotOf(actor).value;
   };
   return bridge;

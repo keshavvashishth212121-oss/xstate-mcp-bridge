@@ -1,5 +1,5 @@
 import { createActor, createMachine } from 'xstate';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpBridge, type CreateMcpBridgeOptions } from '../src/index.js';
@@ -98,5 +98,66 @@ describe('xstate-mcp-bridge', () => {
       state: 'pending',
       context: { count: 0 },
     });
+  });
+
+  it('get_capabilities returns the current state, available events, and permissions', async () => {
+    const permissions = { readState: true, sendEvent: false, reset: true };
+    const client = await connect(setup({ permissions }).server);
+    const response = await client.callTool({ name: 'get_capabilities', arguments: {} });
+
+    expect(response.structuredContent).toEqual({
+      machine_name: 'test',
+      current_state: 'pending',
+      available_events: ['PAY'],
+      permissions,
+    });
+  });
+
+  it('get_history truncates exceeded history and reports dropped items', async () => {
+    const client = await connect(setup({ maxHistory: 1 }).server);
+    await client.callTool({ name: 'send_event', arguments: { type: 'PAY' } });
+    await client.callTool({ name: 'send_event', arguments: { type: 'SHIP' } });
+    const response = await client.callTool({ name: 'get_history', arguments: {} });
+
+    expect(response.structuredContent).toMatchObject({
+      history: [expect.objectContaining({ event: { type: 'SHIP' }, from: 'paid', to: 'shipped' })],
+      truncated: true,
+      droppedCount: 1,
+    });
+  });
+
+  it('wait_for_state cleans up its subscription when timing out', async () => {
+    const machine = createMachine({
+      id: 'never-reaches-target',
+      initial: 'pending',
+      states: {
+        pending: {},
+      },
+    });
+    const actor = createActor(machine).start();
+    const originalSubscribe = actor.subscribe.bind(actor);
+    const unsubscribe = vi.fn();
+    vi.spyOn(actor, 'subscribe').mockImplementation(((observer: Parameters<typeof actor.subscribe>[0]) => {
+      const subscription = originalSubscribe(observer);
+      return {
+        unsubscribe: () => {
+          unsubscribe();
+          subscription.unsubscribe();
+        },
+      };
+    }) as typeof actor.subscribe);
+    const server = createMcpBridge({ name: 'timeout-test', actor });
+    const client = await connect(server);
+
+    const response = await client.callTool({
+      name: 'wait_for_state',
+      arguments: { state: 'complete', timeout: 10 },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.content).toContainEqual(
+      expect.objectContaining({ text: expect.stringContaining('Timed out waiting for state: complete') }),
+    );
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
